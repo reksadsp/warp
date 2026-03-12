@@ -1,94 +1,59 @@
 {
-  description = "Cross-platform Rust GPU warping module";
+  description = "Rust development environment";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    rust-overlay.url = "github:oxalica/rust-overlay";
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-overlay }:
+  outputs = { self, nixpkgs, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        overlays = [ (import rust-overlay) ];
-
-        pkgs = import nixpkgs {
-          inherit system overlays;
-        };
-
-        rustToolchain = pkgs.rust-bin.stable.latest.default.override {
-          extensions = [
-            "rust-src"
-            "rustfmt"
-            "clippy"
+        pkgs = nixpkgs.legacyPackages.${system};
+        # Read the file relative to the flake's root
+        overrides = (builtins.fromTOML (builtins.readFile (self + "/rust-toolchain.toml")));
+      in
+      {
+        devShells.default = pkgs.mkShell rec {
+          nativeBuildInputs = [ pkgs.pkg-config ];
+          buildInputs = with pkgs; [
+            clang
+            llvmPackages.bintools
+            rustup
           ];
-          targets = [
-            "x86_64-unknown-linux-gnu"
-            "aarch64-unknown-linux-gnu"
-            "x86_64-pc-windows-gnu"
-            "aarch64-apple-darwin"
-            "x86_64-apple-darwin"
-          ];
-        };
 
-        commonDeps = with pkgs; [
-          rustToolchain
-          pkg-config
-          clang
-          llvmPackages.bintools
-          sdl2
-
-        ];
-
-        linuxDeps = with pkgs; [
-          vulkan-loader
-          vulkan-headers
-          wayland
-          libxkbcommon
-        ];
-
-        darwinDeps = with pkgs; [
-          darwin.apple_sdk.frameworks.Metal
-          darwin.apple_sdk.frameworks.Foundation
-        ];
-
-        windowsDeps = with pkgs; [
-          mingw_w64
-        ];
-
-      in {
-        devShells.default = pkgs.mkShell {
-          buildInputs =
-            commonDeps
-            ++ pkgs.lib.optionals pkgs.stdenv.isLinux linuxDeps
-            ++ pkgs.lib.optionals pkgs.stdenv.isDarwin darwinDeps
-            ++ pkgs.lib.optionals pkgs.stdenv.isWindows windowsDeps;
-
-          RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
-
+          RUSTC_VERSION = overrides.toolchain.channel;
+          
+          # https://github.com/rust-lang/rust-bindgen#environment-variables
+          LIBCLANG_PATH = pkgs.lib.makeLibraryPath [ pkgs.llvmPackages_latest.libclang.lib ];
+          
           shellHook = ''
-            echo "Rust GPU dev shell (${system})"
+            export PATH=$PATH:''${CARGO_HOME:-~/.cargo}/bin
+            export PATH=$PATH:''${RUSTUP_HOME:-~/.rustup}/toolchains/$RUSTC_VERSION-aarch64-darwin/bin/
           '';
-        };
 
-        packages.default = pkgs.rustPlatform.buildRustPackage {
-          pname = "gpu-remap";
-          version = "0.1.0";
+          # Add precompiled library to rustc search path
+          RUSTFLAGS = (builtins.map (a: ''-L ${a}/lib'') [
+            # add libraries here (e.g. pkgs.libvmi)
+          ]);
+          
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (buildInputs ++ nativeBuildInputs);
 
-          src = ./.;
-
-          cargoLock.lockFile = ./Cargo.lock;
-
-          nativeBuildInputs = commonDeps;
-
-          buildInputs =
-            pkgs.lib.optionals pkgs.stdenv.isLinux linuxDeps
-            ++ pkgs.lib.optionals pkgs.stdenv.isDarwin darwinDeps
-            ++ pkgs.lib.optionals pkgs.stdenv.isWindows windowsDeps;
-
-          doCheck = false;
+          
+          # Add glibc, clang, glib, and other headers to bindgen search path
+          BINDGEN_EXTRA_CLANG_ARGS =
+          # Includes normal include path
+          (builtins.map (a: ''-I"${a}/include"'') [
+            # add dev libraries here (e.g. pkgs.libvmi.dev)
+            pkgs.glibc.dev
+          ])
+          # Includes with special directory paths
+          ++ [
+            ''-I"${pkgs.llvmPackages_latest.libclang.lib}/lib/clang/${pkgs.llvmPackages_latest.libclang.version}/include"''
+            ''-I"${pkgs.glib.dev}/include/glib-2.0"''
+            ''-I${pkgs.glib.out}/lib/glib-2.0/include/''
+          ];
         };
       }
     );
 }
-

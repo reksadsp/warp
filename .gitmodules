@@ -1,0 +1,3 @@
+[submodule "rust/scap"]
+	path = rust/scap
+	url = https://github.com/CapSoftware/scap.git
