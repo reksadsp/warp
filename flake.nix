@@ -17,7 +17,10 @@
         devShells.default = pkgs.mkShell rec {
           nativeBuildInputs = [ pkgs.pkg-config ];
           buildInputs = with pkgs; [
+            dbus
             clang
+            pipewire
+            pkgconf
             llvmPackages.bintools
             rustup
           ];
@@ -28,12 +31,9 @@
           LIBCLANG_PATH = pkgs.lib.makeLibraryPath [ pkgs.llvmPackages_latest.libclang.lib ];
           
           shellHook = ''
-            export PATH=$PATH:''${CARGO_HOME:-~/.cargo}/bin
-<<<<<<< HEAD
-            export PATH=$PATH:''${RUSTUP_HOME:-~/.rustup}/toolchains/$RUSTC_VERSION-aarch64-darwin/bin/
-=======
-            export PATH=$PATH:''${RUSTUP_HOME:-~/.rustup}/toolchains/$RUSTC_VERSION-x86_64-unknown-linux-gnu/bin/
->>>>>>> a543961 (build scap)
+              export "RUST_BACKTRACE=1"
+              cargo build --verbose
+              cargo run
           '';
 
           # Add precompiled library to rustc search path
