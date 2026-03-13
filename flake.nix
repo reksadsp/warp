@@ -29,7 +29,11 @@
           
           shellHook = ''
             export PATH=$PATH:''${CARGO_HOME:-~/.cargo}/bin
+<<<<<<< HEAD
             export PATH=$PATH:''${RUSTUP_HOME:-~/.rustup}/toolchains/$RUSTC_VERSION-aarch64-darwin/bin/
+=======
+            export PATH=$PATH:''${RUSTUP_HOME:-~/.rustup}/toolchains/$RUSTC_VERSION-x86_64-unknown-linux-gnu/bin/
+>>>>>>> a543961 (build scap)
           '';
 
           # Add precompiled library to rustc search path
