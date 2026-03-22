@@ -19,6 +19,7 @@
           buildInputs = with pkgs; [
             dbus
             clang
+            clippy
             pipewire
             pkgconf
             llvmPackages.bintools

@@ -3,32 +3,7 @@ use scap::{
     frame::Frame,
 };
 
-use pipewire::{
-    main_loop::MainLoopBox,
-    context::ContextBox
-};
-
-mod targets;
-mod utils;
-
-// Helper Methods
-pub use targets::{get_all_targets, get_main_display};
-pub use targets::{Display, Target};
-pub use utils::has_permission;
-pub use utils::is_supported;
-pub use utils::request_permission;
-
-//entry
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mainloop = MainLoopBox::new(scap_entry)?;
-    let context = ContextBox::new(&mainloop.loop_(), None)?;
-    let core = context.connect(None)?;
-    let registry = core.get_registry()?;
-
-    Ok(())
-}
-//scap
-fn scap_entry() {
+fn main() {
     // Check if the platform is supported
     if !scap::is_supported() {
         println!("❌ Platform not supported");
@@ -83,5 +58,3 @@ fn scap_entry() {
     // Stop Capture
     capturer.stop_capture();
 }
-
-
