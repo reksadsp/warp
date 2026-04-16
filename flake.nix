@@ -33,7 +33,6 @@
           
           shellHook = ''
               export "RUST_BACKTRACE=1"
-              cargo build --verbose
               cargo run
           '';
 

@@ -4,5 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+winit = "0.29"
+wgpu = "29.0.1"
 scap = "0.0.8"
+pollster = "0.3"
 pipewire = "0.8.0"
