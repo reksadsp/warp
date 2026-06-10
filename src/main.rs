@@ -1,16 +1,30 @@
+use std::sync::{Arc, Mutex};
+use std::num::NonZero;
+use std::thread;
+
 use scap::{
-    capturer::{Point, Area, Size, Capturer, Options},
+    capturer::{Area, Capturer, Options, Point, Size},
     frame::Frame,
 };
-use std::num::NonZero;
-use std::sync::{Arc, Mutex};
-use std::thread;
+
 use winit::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
 };
-// ─── shared state between capture thread and render thread ───────────────────
+
+// ─── frame format tag ────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, Debug)]
+enum FrameFormat {
+    Bgra,
+    Bgrx,
+    Rgbx,
+    Rgb,
+}
+
+// ─── shared state ────────────────────────────────────────────────────────────
+
 struct FrameBuffer {
     data: Vec<u8>,
     width: u32,
@@ -18,30 +32,54 @@ struct FrameBuffer {
     dirty: bool,
 }
 
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
+// Normalize any captured frame to packed RGBA bytes.
+fn to_rgba(data: &[u8], format: FrameFormat) -> Vec<u8> {
+    match format {
+        // RGBx is already [R, G, B, X] — identical layout to RGBA for our purposes
+        FrameFormat::Rgbx => data.to_vec(),
+        // BGRA / BGRX: swap B (byte 0) and R (byte 2) in every pixel
+        FrameFormat::Bgra | FrameFormat::Bgrx => {
+            let mut out = data.to_vec();
+            for pixel in out.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+            out
+        }
+        // RGB: pad each 3-byte pixel to 4 bytes with opaque alpha
+        FrameFormat::Rgb => data
+            .chunks_exact(3)
+            .flat_map(|p| [p[0], p[1], p[2], 255u8])
+            .collect(),
+    }
+}
+
+// Destructure any supported Frame variant into (width, height, bytes, format).
+// Returns None for variants we don't handle (e.g. YUV).
+fn extract_frame(frame: Frame) -> Option<(u32, u32, Vec<u8>, FrameFormat)> {
+    match frame {
+        Frame::BGRA(f) => Some((f.width as u32, f.height as u32, f.data, FrameFormat::Bgra)),
+        Frame::BGR0(f) => Some((f.width as u32, f.height as u32, f.data, FrameFormat::Bgrx)),
+        Frame::RGBx(f) => Some((f.width as u32, f.height as u32, f.data, FrameFormat::Rgbx)),
+        Frame::RGB(f)  => Some((f.width as u32, f.height as u32, f.data, FrameFormat::Rgb)),
+        _ => None,
+    }
+}
+
+// ─── main ─────────────────────────────────────────────────────────────────────
+
 fn main() {
-    // Check if the platform is supported
     if !scap::is_supported() {
-        println!("❌ Platform not supported");
+        eprintln!("Platform not supported");
         return;
     }
-
-    // Check if we have permission to capture screen
-    // If we don't, request it.
     if !scap::has_permission() {
-        println!("❌ Permission not granted. Requesting permission...");
         if !scap::request_permission() {
-            println!("❌ Permission denied");
+            eprintln!("Permission denied");
             return;
         }
     }
-
-    // Get recording targets
-    let targets = scap::get_all_targets();
-    println!("Targets: {:?}", targets);
-
-    // All your displays and windows are targets
-    // You can filter this and capture the one you need.
-
     // Create Options
     let options = Options {
         fps: 120,
@@ -60,45 +98,63 @@ fn main() {
         }),
         ..Default::default()
     };
-
     // Create Capturer
     let mut capturer = Capturer::build(options).unwrap();
-
     // Start Capture
     capturer.start_capture();
-
-    // Grab one frame to know the dimensions before we build the window
-    let (init_w, init_h, init_data) = loop {
-        if let Ok(Frame::BGRA(f)) = capturer.get_next_frame() {
-            break (f.width as u32, f.height as u32, f.data);
+    // ── bootstrap: grab one frame to learn dimensions ─────────────────────────
+    println!("Waiting for first frame...");
+    let (init_w, init_h, init_rgba) = loop {
+        match capturer.get_next_frame() {
+            Ok(other) => println!("Got unexpected frame variant: {:?}", std::mem::discriminant(&other)),
+            Ok(frame) => {
+                if let Some((w, h, raw, fmt)) = extract_frame(frame) {
+                    println!("Got first frame: {}x{} format={:?}", w, h, fmt);
+                    break (w, h, to_rgba(&raw, fmt));
+                }
+            }
+            Err(e) => {
+                eprintln!("Frame error: {:?}", e);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
         }
     };
+    // Stop Capture
+    capturer.stop_capture();
 
-    // ── shared frame buffer ───────────────────────────────────────────────────
+    // ── shared frame buffer (always stores normalized RGBA) ───────────────────
     let shared = Arc::new(Mutex::new(FrameBuffer {
-        data: init_data,
+        data: init_rgba,
         width: init_w,
         height: init_h,
         dirty: true,
     }));
 
-    // Capture thread
+    // ── capture thread ────────────────────────────────────────────────────────
     let shared_write = Arc::clone(&shared);
     thread::spawn(move || loop {
-        if let Ok(Frame::BGRA(f)) = capturer.get_next_frame() {
-            if let Ok(mut buf) = shared_write.lock() {
-                buf.data = f.data;
-                buf.width = f.width as u32;
-                buf.height = f.height as u32;
-                buf.dirty = true;
+        match capturer.get_next_frame() {
+            Ok(frame) => {
+                if let Some((w, h, raw, fmt)) = extract_frame(frame) {
+                    // ← to_rgba is called HERE on every subsequent frame
+                    let rgba = to_rgba(&raw, fmt);
+                    if let Ok(mut buf) = shared_write.lock() {
+                        buf.data = rgba;
+                        buf.width = w;
+                        buf.height = h;
+                        buf.dirty = true;
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Capture error: {:?}", e);
+                std::thread::sleep(std::time::Duration::from_millis(100));
             }
         }
     });
 
-    // winit 0.29: EventLoop::new() returns Result, must unwrap
+    // ── winit + wgpu setup ────────────────────────────────────────────────────
     let event_loop = EventLoop::new().unwrap();
-
-    // winit 0.29: build() takes &event_loop (the unwrapped value), not &Result
     let window = Arc::new(
         WindowBuilder::new()
             .with_title("scap preview")
@@ -110,6 +166,7 @@ fn main() {
     let (device, queue, surface, mut config) =
         pollster::block_on(init_wgpu(Arc::clone(&window), init_w, init_h));
 
+    // Always Rgba8Unorm — to_rgba() has already normalized the bytes
     let (mut cap_tex, mut cap_view) = make_texture(&device, init_w, init_h);
 
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -179,16 +236,14 @@ fn main() {
 
     let mut bind_group = make_bind_group(&device, &bgl, &cap_view, &sampler);
 
+    // ── event loop ────────────────────────────────────────────────────────────
     let shared_read = Arc::clone(&shared);
-
-    // winit 0.29: run() takes (event, elwt) — elwt is &EventLoopWindowTarget
     event_loop.run(move |event, elwt| {
-        // winit 0.29: set_control_flow on elwt, not by assigning *control_flow
         elwt.set_control_flow(ControlFlow::Poll);
 
         match event {
-            // winit 0.29: MainEventsCleared is gone; AboutToWait is its replacement
             Event::AboutToWait => {
+                // Upload latest RGBA frame if one is waiting
                 if let Ok(mut buf) = shared_read.lock() {
                     if buf.dirty {
                         let (w, h) = (buf.width, buf.height);
@@ -196,26 +251,25 @@ fn main() {
                             (cap_tex, cap_view) = make_texture(&device, w, h);
                             bind_group = make_bind_group(&device, &bgl, &cap_view, &sampler);
                         }
+                        // ← to_rgba has already been called in the capture thread;
+                        //   buf.data is already normalized RGBA, upload directly
                         upload_frame(&queue, &cap_tex, &buf.data, w, h);
                         buf.dirty = false;
                     }
                 }
 
-                // wgpu 29: get_current_texture() returns CurrentSurfaceTexture enum
                 let frame = match surface.get_current_texture() {
                     wgpu::CurrentSurfaceTexture::Success(t) => t,
                     wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
                         surface.configure(&device, &config);
                         t
                     }
-                    // Timeout, Outdated, Lost, Occluded, Validation — skip frame
                     _ => return,
                 };
 
                 let view = frame.texture.create_view(&Default::default());
-                let mut enc = device.create_command_encoder(
-                    &wgpu::CommandEncoderDescriptor::default()
-                );
+                let mut enc = device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
                 {
                     let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: None,
@@ -231,7 +285,7 @@ fn main() {
                         depth_stencil_attachment: None,
                         timestamp_writes: None,
                         occlusion_query_set: None,
-                        multiview_mask: NonZero::new(0), // wgpu 29: required
+                        multiview_mask: NonZero::new(0),
                     });
                     rp.set_pipeline(&pipeline);
                     rp.set_bind_group(0, &bind_group, &[]);
@@ -242,20 +296,13 @@ fn main() {
                 window.request_redraw();
             }
 
-            Event::WindowEvent {
-                event: WindowEvent::Resized(size),
-                ..
-            } => {
+            Event::WindowEvent { event: WindowEvent::Resized(size), .. } => {
                 config.width = size.width.max(1);
                 config.height = size.height.max(1);
                 surface.configure(&device, &config);
             }
 
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                ..
-            } => {
-                // winit 0.29: exit via elwt.exit(), ControlFlow::Exit is gone
+            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
                 elwt.exit();
             }
 
@@ -288,24 +335,21 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> V2F {
     );
     return V2F(vec4(xy[vi], 0.0, 1.0), uv[vi]);
 }
-
 @fragment
 fn fs_main(v: V2F) -> @location(0) vec4<f32> {
     let c = textureSample(cap_tex, cap_smp, v.uv);
-    // Bgra8Unorm: hardware stores B,G,R,A but wgpu exposes as .r=B .g=G .b=R .a=A
-    // Swap red and blue so the window shows correct colours:
-    return vec4(c.b, c.g, c.r, 1.0);
+    return vec4(c.r, c.g, c.b, 1.0);
 }
 "#;
 
-// ─── helpers ──────────────────────────────────────────────────────────────────
+// ─── wgpu helpers ─────────────────────────────────────────────────────────────
+
 async fn init_wgpu(
     window: Arc<winit::window::Window>,
     w: u32,
     h: u32,
 ) -> (wgpu::Device, wgpu::Queue, wgpu::Surface<'static>, wgpu::SurfaceConfiguration) {
     let instance = wgpu::Instance::default();
-    // wgpu 29 + winit 0.29: create_surface takes Arc<Window> for 'static lifetime
     let surface = instance.create_surface(window).unwrap();
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
@@ -314,12 +358,11 @@ async fn init_wgpu(
         })
         .await
         .unwrap();
-    // wgpu 29: request_device takes only 1 argument
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: None,
-            experimental_features: wgpu::ExperimentalFeatures::disabled(),
             required_features: wgpu::Features::empty(),
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
             required_limits: wgpu::Limits::default(),
             memory_hints: Default::default(),
             trace: wgpu::Trace::Off,
@@ -335,12 +378,13 @@ async fn init_wgpu(
         present_mode: wgpu::PresentMode::AutoVsync,
         alpha_mode: caps.alpha_modes[0],
         view_formats: vec![],
-        desired_maximum_frame_latency: 2, // wgpu 29: required field
+        desired_maximum_frame_latency: 2,
     };
     surface.configure(&device, &config);
     (device, queue, surface, config)
 }
 
+// Always Rgba8Unorm — to_rgba() guarantees the bytes match this format
 fn make_texture(device: &wgpu::Device, w: u32, h: u32) -> (wgpu::Texture, wgpu::TextureView) {
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: None,
@@ -348,7 +392,7 @@ fn make_texture(device: &wgpu::Device, w: u32, h: u32) -> (wgpu::Texture, wgpu::
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Bgra8Unorm, // matches scap's BGRA byte layout
+        format: wgpu::TextureFormat::Rgba8Unorm,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
@@ -360,7 +404,6 @@ fn upload_frame(queue: &wgpu::Queue, tex: &wgpu::Texture, data: &[u8], w: u32, h
     queue.write_texture(
         tex.as_image_copy(),
         data,
-        // wgpu 29: TexelCopyBufferLayout (was ImageDataLayout in older versions)
         wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(4 * w),

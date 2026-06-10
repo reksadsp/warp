@@ -1,11 +1,9 @@
 {
   description = "Rust development environment";
-
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
   };
-
   outputs = { self, nixpkgs, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let
@@ -18,31 +16,32 @@
           nativeBuildInputs = [ pkgs.pkg-config ];
           buildInputs = with pkgs; [
             dbus
+            glib
             clang
             clippy
             pipewire
             pkgconf
+            xdg-desktop-portal
+            xdg-desktop-portal-hyprland
             llvmPackages.bintools
             rustup
           ];
-
           RUSTC_VERSION = overrides.toolchain.channel;
           
           # https://github.com/rust-lang/rust-bindgen#environment-variables
           LIBCLANG_PATH = pkgs.lib.makeLibraryPath [ pkgs.llvmPackages_latest.libclang.lib ];
           
           shellHook = ''
+              export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus"
               export "RUST_BACKTRACE=1"
               cargo run
           '';
-
           # Add precompiled library to rustc search path
           RUSTFLAGS = (builtins.map (a: ''-L ${a}/lib'') [
             # add libraries here (e.g. pkgs.libvmi)
           ]);
           
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (buildInputs ++ nativeBuildInputs);
-
           
           # Add glibc, clang, glib, and other headers to bindgen search path
           BINDGEN_EXTRA_CLANG_ARGS =
