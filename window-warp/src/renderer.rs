@@ -34,6 +34,16 @@ struct SourceTexture {
     height: u32,
 }
 
+/// Offscreen copy of the warped frame, at a fixed size, for the encoder. It is
+/// independent of the preview window so that resizing does not disturb the
+/// stream.
+struct EncodeTarget {
+    texture: ID3D11Texture2D,
+    view: ID3D11RenderTargetView,
+    width: u32,
+    height: u32,
+}
+
 pub struct Renderer {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
@@ -44,6 +54,7 @@ pub struct Renderer {
     sampler: ID3D11SamplerState,
     constants: ID3D11Buffer,
     source: Option<SourceTexture>,
+    encode: Option<EncodeTarget>,
     width: u32,
     height: u32,
 }
@@ -96,6 +107,7 @@ impl Renderer {
             sampler: sampler.ok_or_else(|| anyhow!("no sampler state"))?,
             constants: constants.ok_or_else(|| anyhow!("no constant buffer"))?,
             source: None,
+            encode: None,
             width,
             height,
         };
@@ -212,20 +224,90 @@ impl Renderer {
         }
     }
 
+    /// Draws the preview into the swapchain and shows it.
     pub fn render(&mut self, params: &WarpParams) -> Result<()> {
         let Some(target_view) = self.target_view.clone() else {
             return Ok(());
         };
-        let source_view = self.source.as_ref().map(|source| source.view.clone());
+        self.draw(&target_view, self.width, self.height, params)?;
+        unsafe { self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()? };
+        Ok(())
+    }
 
-        self.update_constants(params)?;
+    /// Sets up, or resizes, the offscreen render target the encoder reads.
+    pub fn enable_encode_target(&mut self, width: u32, height: u32) -> Result<()> {
+        if self
+            .encode
+            .as_ref()
+            .is_some_and(|target| target.width == width && target.height == height)
+        {
+            return Ok(());
+        }
+
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+            ..Default::default()
+        };
+        unsafe {
+            let mut texture = None;
+            self.device
+                .CreateTexture2D(&desc, None, Some(&mut texture))?;
+            let texture = texture.ok_or_else(|| anyhow!("no encode texture"))?;
+            let mut view = None;
+            self.device
+                .CreateRenderTargetView(&texture, None, Some(&mut view))?;
+            self.encode = Some(EncodeTarget {
+                texture,
+                view: view.ok_or_else(|| anyhow!("no encode render target view"))?,
+                width,
+                height,
+            });
+        }
+        Ok(())
+    }
+
+    /// Draws the same warp into the encoder's render target and returns it.
+    pub fn render_encode_frame(&mut self, params: &WarpParams) -> Result<ID3D11Texture2D> {
+        let Some((view, texture, width, height)) = self.encode.as_ref().map(|target| {
+            (
+                target.view.clone(),
+                target.texture.clone(),
+                target.width,
+                target.height,
+            )
+        }) else {
+            return Err(anyhow!("the encode target has not been created"));
+        };
+        self.draw(&view, width, height, params)?;
+        Ok(texture)
+    }
+
+    fn draw(
+        &self,
+        target_view: &ID3D11RenderTargetView,
+        width: u32,
+        height: u32,
+        params: &WarpParams,
+    ) -> Result<()> {
+        let source_view = self.source.as_ref().map(|source| source.view.clone());
+        self.update_constants(params, width, height)?;
 
         unsafe {
             let viewport = D3D11_VIEWPORT {
                 TopLeftX: 0.0,
                 TopLeftY: 0.0,
-                Width: self.width as f32,
-                Height: self.height as f32,
+                Width: width as f32,
+                Height: height as f32,
                 MinDepth: 0.0,
                 MaxDepth: 1.0,
             };
@@ -233,7 +315,7 @@ impl Renderer {
             self.context
                 .OMSetRenderTargets(Some(&[Some(target_view.clone())]), None);
             self.context
-                .ClearRenderTargetView(&target_view, &[0.0, 0.0, 0.0, 1.0]);
+                .ClearRenderTargetView(target_view, &[0.0, 0.0, 0.0, 1.0]);
 
             if let Some(source_view) = source_view {
                 self.context.IASetPrimitiveTopology(
@@ -249,15 +331,21 @@ impl Renderer {
                     .PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
                 self.context.Draw(3, 0);
             }
-
-            self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()?;
         }
         Ok(())
     }
 
-    fn update_constants(&self, params: &WarpParams) -> Result<()> {
+    pub fn device(&self) -> &ID3D11Device {
+        &self.device
+    }
+
+    pub fn context(&self) -> &ID3D11DeviceContext {
+        &self.context
+    }
+
+    fn update_constants(&self, params: &WarpParams, width: u32, height: u32) -> Result<()> {
         let constants = WarpConstants {
-            output_size: [self.width as f32, self.height as f32],
+            output_size: [width as f32, height as f32],
             inner_radius: params.inner_radius,
             outer_radius: params.outer_radius,
             start_angle: params.start_angle_deg.to_radians(),

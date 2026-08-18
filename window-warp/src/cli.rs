@@ -57,9 +57,41 @@ pub struct Cli {
     /// Keep the window borderless and always on top.
     #[arg(long)]
     pub overlay: bool,
+
+    /// Encode the warped frames to H.264 and send them, in an MPEG-TS, to this
+    /// UDP address, for example udp://239.0.0.1:5004.
+    #[arg(long, value_name = "udp://HOST:PORT")]
+    pub stream: Option<String>,
+
+    /// Side length of the encoded frames, in pixels. Defaults to --size.
+    #[arg(long, value_name = "PIXELS")]
+    pub stream_size: Option<u32>,
+
+    /// Encoder bitrate, in bits per second.
+    #[arg(long, default_value_t = 8_000_000, value_name = "BITS")]
+    pub bitrate: u32,
+
+    /// Frames between key frames. Defaults to two seconds worth of frames.
+    #[arg(long, value_name = "FRAMES")]
+    pub gop: Option<u32>,
+
+    /// Time to live of the multicast datagrams.
+    #[arg(long, default_value_t = 1, value_name = "HOPS")]
+    pub multicast_ttl: u32,
 }
 
 impl Cli {
+    /// H.264 dimensions are macroblock based, so the encoded size is rounded to
+    /// an even number of pixels.
+    pub fn stream_size(&self) -> u32 {
+        let size = self.stream_size.unwrap_or(self.size).max(16);
+        size + (size % 2)
+    }
+
+    pub fn gop(&self) -> u32 {
+        self.gop.unwrap_or_else(|| self.fps.max(1) * 2)
+    }
+
     pub fn warp_params(&self) -> WarpParams {
         WarpParams {
             inner_radius: self.inner_radius.clamp(0.0, 0.95),
