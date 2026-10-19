@@ -2,6 +2,9 @@
 mod cli;
 // Both are platform independent, but only the Windows binary drives them.
 #[cfg_attr(not(windows), allow(dead_code))]
+mod input_server;
+// Both are platform independent, but only the Windows binary drives them.
+#[cfg_attr(not(windows), allow(dead_code))]
 mod mpegts;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod stream;
@@ -29,6 +32,15 @@ fn main() -> anyhow::Result<()> {
     windows_main::run()
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
+fn describe_stream_start(size: u32, bitrate: u32, destination: std::net::SocketAddr) -> String {
+    format!(
+        "streaming {size}x{size} H.264 at {} kbit/s to udp://{}",
+        bitrate / 1000,
+        destination
+    )
+}
+
 #[cfg(windows)]
 mod windows_main {
     use anyhow::{Context, Result};
@@ -38,6 +50,7 @@ mod windows_main {
     use crate::capture::Capture;
     use crate::cli::Cli;
     use crate::encoder::{EncodedFrame, EncoderConfig, H264Encoder};
+    use crate::input_server::InputServer;
     use crate::renderer::Renderer;
     use crate::stream::UdpStream;
     use crate::window::OutputWindow;
@@ -80,6 +93,15 @@ mod windows_main {
 
         let mut streaming = match &args.stream {
             Some(url) => Some(Streaming::start(&mut renderer, &args, url)?),
+            None => None,
+        };
+        let _control_server = match &args.control_bind {
+            Some(bind) => {
+                let server = InputServer::bind(bind)?;
+                let local_addr = server.local_addr()?;
+                println!("trusted-LAN pointer control listening on tcp://{local_addr}");
+                Some(server.start_logging())
+            }
             None => None,
         };
 
@@ -135,11 +157,7 @@ mod windows_main {
             let encoder = H264Encoder::new(renderer.device(), renderer.context(), config)
                 .context("failed to set up the H.264 encoder")?;
             let sink = UdpStream::open(url, args.multicast_ttl)?;
-            println!(
-                "streaming {size}x{size} H.264 at {} kbit/s to udp://{}",
-                config.bitrate / 1000,
-                sink.destination()
-            );
+            println!("{}", crate::describe_stream_start(size, config.bitrate, sink.destination()));
 
             Ok(Self {
                 encoder,
@@ -170,6 +188,20 @@ mod windows_main {
                     .send_access_unit(&frame.data, frame.pts_90khz(), frame.keyframe)?;
             }
             Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::net::SocketAddr;
+
+        #[test]
+        fn describes_stream_start_for_target_destination() {
+            let destination: SocketAddr = "239.0.0.1:5004".parse().unwrap();
+            assert_eq!(
+                crate::describe_stream_start(720, 8_000_000, destination),
+                "streaming 720x720 H.264 at 8000 kbit/s to udp://239.0.0.1:5004"
+            );
         }
     }
 }

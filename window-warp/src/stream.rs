@@ -100,6 +100,7 @@ fn parse_udp_url(url: &str) -> Result<SocketAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn parses_plain_and_ffmpeg_style_urls() {
@@ -117,5 +118,25 @@ mod tests {
     fn rejects_other_schemes_and_missing_ports() {
         assert!(parse_udp_url("rtp://239.0.0.1:5004").is_err());
         assert!(parse_udp_url("udp://239.0.0.1").is_err());
+    }
+
+    #[test]
+    fn sends_transport_datagrams_to_udp_destination() {
+        let receiver = UdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let destination = receiver.local_addr().unwrap();
+
+        let mut stream = UdpStream::open(&format!("udp://{destination}"), 1).unwrap();
+        stream
+            .send_access_unit(&[0, 0, 0, 1, 0x65, 0x88, 0x84], 90_000, true)
+            .unwrap();
+        stream.flush().unwrap();
+
+        let mut datagram = [0u8; 1500];
+        let bytes = receiver.recv(&mut datagram).unwrap();
+        assert!(bytes > 0);
+        assert_eq!(datagram[0], 0x47);
     }
 }

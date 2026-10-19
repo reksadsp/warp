@@ -63,6 +63,10 @@ pub struct Cli {
     #[arg(long, value_name = "udp://HOST:PORT")]
     pub stream: Option<String>,
 
+    /// Bind a trusted-LAN pointer-control listener for one embedded sidecar.
+    #[arg(long, value_name = "HOST:PORT")]
+    pub control_bind: Option<String>,
+
     /// Side length of the encoded frames, in pixels. Defaults to --size.
     #[arg(long, value_name = "PIXELS")]
     pub stream_size: Option<u32>,
@@ -113,4 +117,25 @@ pub struct WarpParams {
     pub angle_span_deg: f32,
     pub clockwise: bool,
     pub supersample: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_bind_and_stream_are_parseable() {
+        let cli = Cli::parse_from([
+            "window-warp",
+            "--window",
+            "Ableton",
+            "--stream",
+            "udp://239.0.0.1:5004",
+            "--control-bind",
+            "0.0.0.0:47053",
+        ]);
+        assert_eq!(cli.window.as_deref(), Some("Ableton"));
+        assert_eq!(cli.stream.as_deref(), Some("udp://239.0.0.1:5004"));
+        assert_eq!(cli.control_bind.as_deref(), Some("0.0.0.0:47053"));
+    }
 }
