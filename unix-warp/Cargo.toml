@@ -1,0 +1,20 @@
+# This is deliberately a standalone workspace: its Unix-only dependencies must
+# not be resolved when building the root Warp Link crate.
+[workspace]
+
+[package]
+name = "unix-warp"
+version = "0.1.0"
+edition = "2024"
+description = "Capture a Unix window or display and warp it onto a GPU-rendered disk"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+bytemuck = { version = "1.16", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"] }
+enigo = "0.6"
+pollster = "0.3"
+wgpu = "0.19"
+winit = "0.29"
+xcap = "0.9"
