@@ -13,11 +13,13 @@ use anyhow::{Context, Result, anyhow};
 #[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
-    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEINPUT, SendInput,
-    SetCursorPos,
+    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSE_EVENT_FLAGS,
+    MOUSEINPUT, SendInput,
 };
 #[cfg(windows)]
-use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetSystemMetrics, SetCursorPos, SM_CXSCREEN, SM_CYSCREEN,
+};
 
 pub const MAGIC: [u8; 2] = *b"WS";
 pub const VERSION: u8 = 1;
@@ -484,7 +486,7 @@ impl SystemPointerSink {
                     dx: 0,
                     dy: 0,
                     mouseData: 0,
-                    dwFlags: flag,
+                    dwFlags: MOUSE_EVENT_FLAGS(flag),
                     time: 0,
                     dwExtraInfo: 0,
                 },
