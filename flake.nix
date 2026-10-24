@@ -15,8 +15,11 @@
         unixWarpLibraries = with pkgs;
           lib.optionals stdenv.isLinux [
             dbus
+            ffmpeg-full
             glib
+            intel-media-driver
             libxcb
+            libgbm
             libglvnd
             libxkbcommon
             libxrandr
@@ -43,6 +46,8 @@
           LIBCLANG_PATH = pkgs.lib.makeLibraryPath [ pkgs.llvmPackages.libclang.lib ];
           LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.isLinux
             (pkgs.lib.makeLibraryPath unixWarpLibraries);
+          LIBVA_DRIVERS_PATH = pkgs.lib.optionalString pkgs.stdenv.isLinux
+            "${pkgs.intel-media-driver}/lib/dri";
         };
 
       });

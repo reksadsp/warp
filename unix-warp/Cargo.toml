@@ -6,7 +6,7 @@
 name = "unix-warp"
 version = "0.1.0"
 edition = "2024"
-description = "Capture a Unix window or display and warp it onto a GPU-rendered disk"
+description = "Capture local or receive remote video and warp it onto a GPU-rendered disk"
 license = "MIT"
 
 [dependencies]

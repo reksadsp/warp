@@ -30,6 +30,16 @@ pub struct Renderer {
     params: wgpu::Buffer,
     bind_group: Option<wgpu::BindGroup>,
     source_size: Option<(u32, u32)>,
+    stream_target: Option<StreamTarget>,
+}
+
+struct StreamTarget {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    buffer: wgpu::Buffer,
+    width: u32,
+    height: u32,
+    padded_bytes_per_row: u32,
 }
 
 impl Renderer {
@@ -165,11 +175,45 @@ impl Renderer {
             params,
             bind_group: None,
             source_size: None,
+            stream_target: None,
         })
     }
 
     pub fn source_size(&self) -> Option<(u32, u32)> {
         self.source_size
+    }
+
+    pub fn enable_stream_target(&mut self, width: u32, height: u32) {
+        let padded_bytes_per_row = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("unix-warp stream target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Bgra8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("unix-warp stream readback"),
+            size: padded_bytes_per_row as u64 * height as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        self.stream_target = Some(StreamTarget {
+            view: texture.create_view(&Default::default()),
+            texture,
+            buffer,
+            width,
+            height,
+            padded_bytes_per_row,
+        });
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -243,8 +287,61 @@ impl Renderer {
     }
 
     pub fn render(&mut self, params: WarpParams) -> Result<(), wgpu::SurfaceError> {
+        let output = self.surface.get_current_texture()?;
+        let view = output.texture.create_view(&Default::default());
+        self.render_to(&view, self.config.width, self.config.height, params, None);
+        output.present();
+        Ok(())
+    }
+
+    pub fn render_stream(&mut self, params: WarpParams) -> Result<Vec<u8>> {
+        let target = self
+            .stream_target
+            .take()
+            .context("stream target was not configured")?;
+        let result = (|| {
+            self.render_to(
+                &target.view,
+                target.width,
+                target.height,
+                params,
+                Some((&target.texture, &target.buffer, target.padded_bytes_per_row)),
+            );
+
+            let slice = target.buffer.slice(..);
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |result| {
+                let _ = done_tx.send(result);
+            });
+            self.device.poll(wgpu::Maintain::Wait);
+            done_rx
+                .recv()
+                .context("wait for stream frame readback")?
+                .context("map stream frame readback")?;
+            let mapped = slice.get_mapped_range();
+            let row_bytes = target.width as usize * 4;
+            let mut bgra = Vec::with_capacity(row_bytes * target.height as usize);
+            for row in mapped.chunks_exact(target.padded_bytes_per_row as usize) {
+                bgra.extend_from_slice(&row[..row_bytes]);
+            }
+            drop(mapped);
+            target.buffer.unmap();
+            Ok(bgra)
+        })();
+        self.stream_target = Some(target);
+        result
+    }
+
+    fn render_to(
+        &mut self,
+        view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+        params: WarpParams,
+        copy: Option<(&wgpu::Texture, &wgpu::Buffer, u32)>,
+    ) {
         let constants = GpuWarpParams {
-            output_size: [self.config.width as f32, self.config.height as f32],
+            output_size: [width as f32, height as f32],
             inner_radius: params.inner_radius,
             outer_radius: params.outer_radius,
             start_angle: params.start_angle_deg.to_radians(),
@@ -255,8 +352,6 @@ impl Renderer {
         };
         self.queue
             .write_buffer(&self.params, 0, bytemuck::bytes_of(&constants));
-        let output = self.surface.get_current_texture()?;
-        let view = output.texture.create_view(&Default::default());
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -266,7 +361,7 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("unix-warp render pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -283,8 +378,29 @@ impl Renderer {
                 pass.draw(0..3, 0..1);
             }
         }
+        if let Some((texture, buffer, padded_bytes_per_row)) = copy {
+            encoder.copy_texture_to_buffer(
+                wgpu::ImageCopyTexture {
+                    texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::ImageCopyBuffer {
+                    buffer,
+                    layout: wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded_bytes_per_row),
+                        rows_per_image: Some(height),
+                    },
+                },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
         self.queue.submit(Some(encoder.finish()));
-        output.present();
-        Ok(())
     }
 }

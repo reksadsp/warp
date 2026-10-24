@@ -101,6 +101,14 @@ impl Capture {
             None
         }
     }
+
+    pub fn source_size(&self) -> Option<(u32, u32)> {
+        self.latest
+            .lock()
+            .expect("capture frame lock")
+            .as_ref()
+            .map(|frame| (frame.width, frame.height))
+    }
 }
 
 impl Drop for Capture {
